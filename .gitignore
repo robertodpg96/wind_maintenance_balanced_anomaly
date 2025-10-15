@@ -1,0 +1,67 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Data files (if large or local)
+data/
+*.csv
+*.xlsx
+*.xls
+
+# Model outputs and artifacts
+outputs*/
+results*/
+reports/
+*.html
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+*.spec
+
+# Python packaging / cache
+pip-wheel-metadata/
+__pypackages__/
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+*.json
+
+# Backup files
+*~
+`
