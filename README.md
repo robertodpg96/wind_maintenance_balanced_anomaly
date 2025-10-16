@@ -53,7 +53,6 @@ Final Project/
 │                                               # Fully explained version (step-by-step)
 │
 ├── make_final_onepager.py                      # Builds one-page HTML + PDF report with captions
-├── build_final_onepager.ipynb                  # Notebook interface for the report builder
 │
 ├── outputs_balanced/                           # Results of supervised models
 ├── outputs_balanced_anomaly/                   # Anomaly detection outputs
