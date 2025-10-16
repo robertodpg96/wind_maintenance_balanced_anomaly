@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-Wind Turbine Maintenance — FINAL SCRIPT
+Wind Turbine Maintenance — FINAL SCRIPT (with supervised alerts exports)
 Supervised (SMOTE + threshold tuning) + Unsupervised Anomaly Detection
-Includes:
-- Verified imports (no shadowed variables like `np`)
-- ROC/PR curves
-- Precision–Recall vs Threshold plots (supervised + anomaly)
-- Threshold sweeps -> best-F1 thresholds
-- Top 3 threshold tables (best F1; best recall given precision≥0.3 and ≥0.5)
-- Feature importances
-- Anomaly detection (IsolationForest, OneClassSVM) trained on normal data only
-- Top anomalies CSVs and combined scores
-- HTML summary
+
+Adds:
+- Exports per-model supervised alerts: supervised_alerts_RF.csv, supervised_alerts_GBDT.csv
+- Exports union of alerts (either model triggers): supervised_alerts_union.csv
+- Threshold policy configurable: --supervised_alert_policy [best_f1|min_precision], --min_precision 0.5
 
 Usage:
   python train_wind_maintenance_models_balanced_anomaly_final.py \
       --data /path/to/wind_turbine_maintenance_data.csv \
       --out outputs_balanced_anomaly \
-      --contamination 0.05
+      --contamination 0.05 \
+      --supervised_alert_policy best_f1
 """
 
 import argparse
@@ -35,7 +31,6 @@ from sklearn.metrics import (
     precision_recall_curve, classification_report
 )
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
-
 from sklearn.svm import OneClassSVM
 
 # Optional boosters
@@ -110,7 +105,7 @@ def make_gbdt():
             tree_method="hist",
             random_state=42,
             n_jobs=-1,
-            scale_pos_weight=1.0  # not needed after SMOTE
+            scale_pos_weight=1.0
         )
     if LGBM_AVAILABLE:
         return LGBMClassifier(
@@ -179,7 +174,6 @@ def sup_thr_sweep(y_true, y_prob, out_csv: Path):
 
 
 def threshold_sweep_scores(y_true, scores, out_csv: Path):
-    # thresholds from 5th to 95th percentile of scores
     rows = []
     thr_values = np.linspace(np.percentile(scores, 5), np.percentile(scores, 95), 31)
     for thr in thr_values:
@@ -198,20 +192,14 @@ def threshold_sweep_scores(y_true, scores, out_csv: Path):
 
 
 def _top3_thresholds(df_thr: pd.DataFrame, min_precisions=(0.3, 0.5)):
-    """Return top thresholds as a dict:
-    - best_f1_threshold (+ precision/recall/f1 at that point)
-    - for each pmin in min_precisions: threshold with max recall among rows with precision>=pmin
-    """
     out = {}
     if df_thr is None or df_thr.empty:
         return out
-    # Best F1
     i = df_thr['f1'].values.argmax()
     out['best_f1_threshold'] = float(df_thr.iloc[i]['threshold'])
     out['best_f1'] = float(df_thr.iloc[i]['f1'])
     out['best_f1_precision'] = float(df_thr.iloc[i]['precision'])
     out['best_f1_recall'] = float(df_thr.iloc[i]['recall'])
-    # Precision-constrained picks
     for pmin in min_precisions:
         df_ok = df_thr[df_thr['precision'] >= pmin]
         if len(df_ok):
@@ -246,11 +234,15 @@ def plot_importance(model, feature_names, title, out_path: Path, top_k: int = 15
 
 # -------------------------- Main --------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Balanced RF+GBDT with SMOTE + Anomaly Detection (FINAL)")
+    parser = argparse.ArgumentParser(description="Balanced RF+GBDT with SMOTE + Anomaly Detection (FINAL + supervised alerts export)")
     parser.add_argument("--data", required=True, type=str, help="Path to CSV with Maintenance_Label")
     parser.add_argument("--out", default="outputs_balanced_anomaly", type=str, help="Output directory")
     parser.add_argument("--test_size", default=0.2, type=float, help="Test size fraction")
     parser.add_argument("--contamination", default=0.05, type=float, help="Assumed outlier proportion for unsupervised models")
+    parser.add_argument("--supervised_alert_policy", default="best_f1", choices=["best_f1", "min_precision"],
+                        help="How to pick alert thresholds for supervised exports")
+    parser.add_argument("--min_precision", default=0.5, type=float,
+                        help="Minimum precision when --supervised_alert_policy=min_precision")
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -303,7 +295,6 @@ def main():
     # Precision–Recall vs Threshold (supervised)
     for name, probs in [("RandomForest", y_proba_rf), ("GBDT", y_proba_gb)]:
         p_vals, r_vals, thr_vals = precision_recall_curve(y_test, probs)
-        # sklearn returns len(thr)=len(p)-1=len(r)-1; extend to same length for plot
         thr_plot = np.concatenate([thr_vals, [thr_vals[-1] if thr_vals.size else 0.5]]) if thr_vals.size else np.array([0.5])
         fig, ax = plt.subplots(figsize=(6,4))
         ax.plot(thr_plot, p_vals, label="Precision")
@@ -340,6 +331,59 @@ def main():
     ]).set_index("model").sort_values("f1", ascending=False)
     results_sup.to_csv(outdir / "results_balanced_thresholds.csv")
 
+    # === Export Supervised Alerts ===
+    def _pick_thr(df_thr, policy, pmin):
+        if policy == "best_f1":
+            i = df_thr['f1'].values.argmax()
+            return float(df_thr.iloc[i]['threshold']), "best_f1"
+        df_ok = df_thr[df_thr['precision'] >= pmin]
+        if len(df_ok):
+            j = df_ok['recall'].values.argmax()
+            return float(df_ok.iloc[j]['threshold']), f"min_precision>={pmin}"
+        i = df_thr['f1'].values.argmax()
+        return float(df_thr.iloc[i]['threshold']), "fallback_best_f1"
+
+    thr_rf_alert, policy_rf = _pick_thr(df_thr_rf, args.supervised_alert_policy, args.min_precision)
+    thr_gb_alert, policy_gb = _pick_thr(df_thr_gb, args.supervised_alert_policy, args.min_precision)
+
+    sup_rf = pd.DataFrame(index=X_test.index)
+    sup_rf['predicted_prob'] = y_proba_rf
+    sup_rf['predicted_label'] = (y_proba_rf >= thr_rf_alert).astype(int)
+    sup_rf['true_label'] = y_test.values
+    if "Turbine_ID" in df.columns:
+        sup_rf['Turbine_ID'] = df.loc[X_test.index, "Turbine_ID"].values
+    rf_alerts = sup_rf[sup_rf['predicted_label'] == 1].copy()
+    rf_alerts.to_csv(outdir / "supervised_alerts_RF.csv", index=False)
+
+    sup_gb = pd.DataFrame(index=X_test.index)
+    sup_gb['predicted_prob'] = y_proba_gb
+    sup_gb['predicted_label'] = (y_proba_gb >= thr_gb_alert).astype(int)
+    sup_gb['true_label'] = y_test.values
+    if "Turbine_ID" in df.columns:
+        sup_gb['Turbine_ID'] = df.loc[X_test.index, "Turbine_ID"].values
+    gb_alerts = sup_gb[sup_gb['predicted_label'] == 1].copy()
+    gb_alerts.to_csv(outdir / "supervised_alerts_GBDT.csv", index=False)
+
+    union = pd.DataFrame({
+        "row_index": X_test.index,
+        "true_label": y_test.values,
+        "prob_rf": y_proba_rf,
+        "prob_gbdt": y_proba_gb,
+        "rf_trigger": (y_proba_rf >= thr_rf_alert).astype(int),
+        "gbdt_trigger": (y_proba_gb >= thr_gb_alert).astype(int),
+    })
+    if "Turbine_ID" in df.columns:
+        union["Turbine_ID"] = df.loc[X_test.index, "Turbine_ID"].values
+    union['triggered_by'] = union.apply(lambda r: ",".join([m for m,b in [('RF', r['rf_trigger']), ('GBDT', r['gbdt_trigger'])] if b]), axis=1)
+    union_alerts = union[(union['rf_trigger']==1) | (union['gbdt_trigger']==1)].copy()
+    union_alerts['rf_threshold_used'] = thr_rf_alert
+    union_alerts['gbdt_threshold_used'] = thr_gb_alert
+    union_alerts['rf_policy'] = policy_rf
+    union_alerts['gbdt_policy'] = policy_gb
+    union_alerts.to_csv(outdir / "supervised_alerts_union.csv", index=False)
+
+    print(f"Supervised alerts exported: RF={len(rf_alerts)}, GBDT={len(gb_alerts)}, Union={len(union_alerts)}")
+
     # Feature importances
     _ = plot_importance(rf, feature_names, "Feature Importance — RF (SMOTE)", outdir / "feature_importance_rf_smote.png")
     _ = plot_importance(gb, feature_names, "Feature Importance — GBDT (SMOTE)", outdir / "feature_importance_gbdt_smote.png")
@@ -357,8 +401,8 @@ def main():
     oc = OneClassSVM(kernel="rbf", gamma="scale", nu=max(min(args.contamination, 0.49), 0.01)).fit(X_train_norm)
 
     # Get anomaly scores on test set (higher = more anomalous)
-    iso_scores = -iso.score_samples(X_test)            # IF returns higher = more normal -> invert
-    oc_scores  = -oc.decision_function(X_test)         # OCSVM >0 inlier -> invert
+    iso_scores = -iso.score_samples(X_test)
+    oc_scores  = -oc.decision_function(X_test)
 
     # Evaluate against labels
     anom_results = []
@@ -368,7 +412,6 @@ def main():
         pr = average_precision_score(y_test, scores)
         thr_csv = outdir / f"anomaly_threshold_sweep_{name}.csv"
         best_thr, df_thr = threshold_sweep_scores(y_test, scores, thr_csv)
-        # Top threshold summary for this model
         top = _top3_thresholds(df_thr)
         anom_top_rows.append({'model': name, **top})
 
@@ -453,13 +496,13 @@ def main():
         warnings.warn(f"Could not write anomaly HTML summary: {e}")
 
     # Console summaries
-    print("\n=== SUPERVISED (SMOTE) RESULTS (higher is better) ===")
+    print("\\n=== SUPERVISED (SMOTE) RESULTS (higher is better) ===")
     print(results_sup.round(4))
-    print("\nTop thresholds (Supervised):\n", top_sup_df.round(4))
-    print("\n=== ANOMALY RESULTS (higher is better; ROC/PR use scores) ===")
+    print("\\nTop thresholds (Supervised):\\n", top_sup_df.round(4))
+    print("\\n=== ANOMALY RESULTS (higher is better; ROC/PR use scores) ===")
     print(anom_df.round(4))
-    print("\nTop thresholds (Anomaly):\n", anom_top_df.round(4))
-    print("\nArtifacts saved to:", outdir.resolve())
+    print("\\nTop thresholds (Anomaly):\\n", anom_top_df.round(4))
+    print("\\nArtifacts saved to:", outdir.resolve())
 
 
 if __name__ == "__main__":
