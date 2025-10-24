@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Wind Turbine Maintenance — FULL Pipeline (Supervised + Anomaly) — Educational Version
+Wind Turbine Maintenance — FULL Pipeline (Supervised + Anomaly)
 ====================================================================================
 
 What this script does (end-to-end)
@@ -31,10 +31,6 @@ Key assumptions
 - The dataset has a column named **Maintenance_Label**. Any value > 0 is treated as "needs maintenance" (1).
 - All other **numeric** columns are treated as features (strings/timestamps are ignored).
 - If a `Turbine_ID` column exists, it will be preserved in alert CSVs for human-friendly outputs.
-
-Tip
----
-Paths with spaces must be wrapped in quotes on macOS/Linux/Windows shells.
 """
 
 # ----------------------------
